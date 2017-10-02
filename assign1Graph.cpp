@@ -13,14 +13,94 @@
 using namespace std;
 
 typedef vector<vector<int> > AdjacencyMatrix;
+
+/* Global variables */
+int** mutualFriendsMatrix;
+int** recMatrix;
 AdjacencyMatrix adjMatrix;
+int size;
+int threadCount;
+int numRecommends;
 
-int** makeRectangularMatrix(size_t rows, size_t columns);
-void printRectangularMatrix(int** matrix, size_t rows, size_t columns);
-int** findMutualFriends (AdjacencyMatrix adjMatrix, unsigned start, unsigned end, int** resMatrix);
-void indicesOfKMaxElements(int* input, size_t size, int* results, unsigned k);
-void recommendFriends(AdjacencyMatrix adjMatrix, size_t size, unsigned start, unsigned end, unsigned numRecommends, int** recMatrix);
+/* Serial functions */
+int** makeMatrix(size_t rows, size_t columns);
+void printMatrix(int** matrix, size_t rows, size_t columns);
+void findMutualFriends (int i);
+void indicesOfKMaxElements(int* input, int size, int* results, int k);
+void recommendFriends(int start, int end);
 
+/* Parallel function */
+void* PthFindMutualFriends(void* rank);
+
+/*----------------------------------------------------------------------------*/
+int main(int argc, char** argv)
+{
+    if(argc<4){
+      cout<<"To run: ./assign1Graph filename k threads"<<endl;
+      cout<<"./assign1Graph networkDatasets/toyGraph1.txt 4 2"<<endl;
+      return 0;
+    }
+
+    pthread_t* threadHandles;
+    ifstream myfile(argv[1],std::ios_base::in);
+    int u,v;
+    int maxNode = 0;
+    vector<pair<int,int> > allEdges;
+
+    while(myfile >> u >> v)
+    {
+        allEdges.push_back(make_pair(u,v));
+        if(u > maxNode) {
+          maxNode = u;
+        }
+
+        if(v > maxNode) {
+          maxNode = v;
+        }
+    }
+
+    myfile.close();
+
+    int n = maxNode + 1;  //Since nodes starts with 0
+
+    adjMatrix = AdjacencyMatrix(n,vector<int>(n));
+    //populate the matrix
+    for(unsigned i = 0; i < allEdges.size(); i++){
+       u = allEdges[i].first;
+       v = allEdges[i].second;
+       adjMatrix[u][v] = 1;
+       adjMatrix[v][u] = 1;
+    }
+
+    size = (int)adjMatrix.size();
+    numRecommends = atoi(argv[2]);
+    mutualFriendsMatrix = makeMatrix(size, size);
+    recMatrix = makeMatrix(size, numRecommends);
+
+    threadCount = atoi(argv[3]);
+    if(threadCount > 1) {
+      threadHandles = (pthread_t*)malloc(threadCount*sizeof(pthread_t));
+
+      for (int thread = 0; thread < threadCount; thread++) {
+        pthread_create(&threadHandles[thread], NULL,
+                       PthFindMutualFriends, (void*) thread);
+      }
+
+      for (int thread = 0; thread < threadCount; thread++) {
+        pthread_join(threadHandles[thread], NULL);
+      }
+      free(threadHandles);
+    } else {
+      for (int i = 0; i < size; i++) {
+        findMutualFriends(i);
+      }
+    }
+    recommendFriends(0,size);
+
+    printMatrix(recMatrix, size, numRecommends);
+
+    return 0;
+}
 
 void printAdjMatrix(AdjacencyMatrix adjMatrix)
 {
@@ -31,7 +111,11 @@ void printAdjMatrix(AdjacencyMatrix adjMatrix)
     }
 }
 
-int** makeRectangularMatrix(size_t rows, size_t columns) {
+/*------------------------------------------------------------------------------
+ * Function: makeMatrix
+ * Purpose:  Allocate a matrix of ints of size rows x columns
+ */
+int** makeMatrix(size_t rows, size_t columns) {
   int** matrix = 0;
   matrix = new int*[rows];
 
@@ -46,55 +130,66 @@ int** makeRectangularMatrix(size_t rows, size_t columns) {
   return matrix;
 }
 
-void printRectangularMatrix(int** matrix, size_t rows, size_t columns) {
+/*------------------------------------------------------------------------------
+ * Function: printMatrix
+ * Purpose:  Print a matrix to std out
+ * In args:  matrix, rows, columns
+ */
+void printMatrix(int** matrix, size_t rows, size_t columns) {
   for (unsigned r = 0; r < rows; r++) {
     for (unsigned c = 0; c < columns; c++) {
       cout << matrix[r][c] << " ";
     }
     cout << endl;
-  }}
+  }
+}
 
-// O(n^3)
-int** findMutualFriends (AdjacencyMatrix adjMatrix, unsigned start, unsigned end, int** resMatrix) {
-  unsigned size = adjMatrix.size();
+/*------------------------------------------------------------------------------
+ * Function:        countMutualFriends
+ * Purpose:         Counts 
+ * In args:         i : row in adjMatrix
+ * Global in vars:  adjMatrix, size
+ * Global out vars: mutualFriendsMatrix
+ */
+void findMutualFriends(int i) {
+  // I don't want to be recommended myself as a friend
+  mutualFriendsMatrix[i][i] = -1;
 
-  // For each person in the matrix, number i. I am i, i is me.
-  for (unsigned i = start; i < end; i++) {
+  // For every other person in the world, I already know whether or not I am
+  // friends with him/her
+  for (int j = i; j < size; j++) {
+    // If i am friends with person j, then I want to look at all of j's friends
+    // and see which ones I'm not already friends with.
+    if (adjMatrix[i][j] == 1) {
+      if(mutualFriendsMatrix[i][j] == -1) {
+          continue;
+      }
+      // I don't want to j to be recommended to me, we're already friends
+      mutualFriendsMatrix[i][j] = -1;
 
-    // For every other person in the world, I already know whether or not I am
-    // friends with him/her
-    for (unsigned j = 0; j < size; j++) {
-      // If i am friends with person j, then I want to look at all of j's friends
-      // and see which ones I'm not already friends with.
-      if (adjMatrix[i][j] == 1) {
-        // I don't want to j to be recommended to me, we're already friends
-        resMatrix[i][j] = -1;
-
-        // Looking at all of j's friends,
-        for (unsigned k = 0; k < size; k++) {
-          if (adjMatrix[i][k] == 0     // I'm not yet friends with this person, k
-              && adjMatrix [j][k] == 1 // j is already friends with this person
-              && i != k) {             // this person is not me
-            resMatrix[i][k]++;         // then I have one more mutual friend, j,
-                                       // with this person, k, than I knew I
-                                       // had before.
-          }
+      // Looking at all of j's friends,
+      for (int k = 0; k < size; k++) {
+        if (adjMatrix[i][k] == 0      // I'm not yet friends with this person, k
+            && adjMatrix [j][k] == 1  // j is already friends with this person
+            && i != k) {              // this person is not me
+          mutualFriendsMatrix[i][k]++;// then I have one more mutual friend, j,
+          mutualFriendsMatrix[k][i]++;
+                                      // with this person, k, than I knew I
+                                      // had before.
         }
       }
     }
   }
-
-  return resMatrix;
 }
 
 // Takes an array of integers 'input' of length 'size' and places the indices
 // of the 'k' max elements into the int array 'results', assumed to be of
 // length 'k'. Max index is placed in results[0], index of 2nd largest in results[1], etc.
-void indicesOfKMaxElements(int* input, size_t size, int* results, unsigned k) {
+void indicesOfKMaxElements(int* input, int size, int* results, int k) {
   // priority_queue is basically a min heap
   priority_queue<pair<int, int>, vector<pair<int,int> >, greater <pair<int, int> > > q;
-  for (unsigned i = 0; i < size; i++) {
-    if(q.size() < k) {
+  for (int i = 0; i < size; i++) {
+    if(q.size() < (size_t)k) {
       q.push(pair<int,int>(input[i], i));
     } else if (q.top().first < input[i]) {
       q.pop();
@@ -103,67 +198,26 @@ void indicesOfKMaxElements(int* input, size_t size, int* results, unsigned k) {
   }
 
   k = q.size();
-  for (unsigned i = 0; i < k; i++) {
+  for (int i = 0; i < k; i++) {
     results[k - i - 1] = q.top().second;
     q.pop();
   }
   return;
 }
 
-void recommendFriends(AdjacencyMatrix adjMatrix, unsigned start, unsigned end, unsigned numRecommends, int** recMatrix) {
-  unsigned size = adjMatrix.size();
-  int** mutualFriendsMatrix = makeRectangularMatrix(size, size);
-  findMutualFriends(adjMatrix, 0, size, mutualFriendsMatrix);
-
-  for (unsigned i = start; i < end; i++) {
+void recommendFriends(int startRow, int endRow) {
+  for (int i = startRow; i < endRow; i++) {
     indicesOfKMaxElements(mutualFriendsMatrix[i], size, recMatrix[i], numRecommends);
   }
 }
 
-int main(int argc, char** argv)
-{
-    if(argc<4){
-      cout<<"To run: ./assign1Graph filename k threads"<<endl;
-      cout<<"./assign1Graph networkDatasets/toyGraph1.txt 4 2"<<endl;
-      return 0;
-    }
+void* PthFindMutualFriends(void* rank) {
+  long myRank = (long)rank;
 
-    ifstream myfile(argv[1],std::ios_base::in);
-    int k = atoi(argv[2]);
-    int numThreads = atoi(argv[3]);
-    int u,v;
-    int maxNode = 0;
-    vector<pair<int,int> > allEdges;
-    while(myfile >> u >> v)
-    {
-        allEdges.push_back(make_pair(u,v));
-        if(u > maxNode) {
-          maxNode = u;
-        }
+  for (int i = myRank; i < size; i += threadCount) {
+    findMutualFriends(i);
+  }
 
-        if(v > maxNode) {
-          maxNode = v;
-        }
-    }
-    myfile.close();
-
-    int n = maxNode + 1;  //Since nodes starts with 0
-
-    adjMatrix = AdjacencyMatrix(n,vector<int>(n));
-    //populate the matrix
-    for(unsigned i = 0; i < allEdges.size(); i++){
-       u = allEdges[i].first;
-       v = allEdges[i].second;
-       adjMatrix[u][v] = 1;
-       adjMatrix[v][u] = 1;
-    }
-
-    unsigned size = adjMatrix.size();
-
-    int** recMatrix = makeRectangularMatrix(size, k);
-    recommendFriends(adjMatrix, 0, size, k, recMatrix);
-
-    printRectangularMatrix(recMatrix, size, k);
-
-return 0;
+  pthread_exit(NULL);
 }
+
